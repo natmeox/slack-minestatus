@@ -1,24 +1,28 @@
 package main
 
 import (
+	"bufio"
+	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
 )
 
 var Config struct {
-	Debug      bool
-	SlackToken string
-	SlackTeam  string
-	WebAddress string
-	MinecraftAddress string
+	Debug         bool
+	SlackToken    string
+	SlackTeam     string
+	WebAddress    string
+	MinecraftHost string
+	MinecraftPort int
 }
 
-var MinecraftAddress *TCPAddr
+var MinecraftAddress *net.TCPAddr
 
 type SlackMessage struct {
 	ChannelName string
@@ -33,7 +37,115 @@ type SlackResponse struct {
 	Text string `json:"text"`
 }
 
+type MinecraftStatus struct {
+	ProtocolVersion uint64
+	ServerVersion   string
+	Motd            string
+	Players         uint64
+	MaxPlayers      uint64
+}
+
+func GetStatus() (stat *MinecraftStatus, err error) {
+	log.Println("Connecting to", MinecraftAddress)
+	netConn, err := net.DialTCP("tcp", nil, MinecraftAddress)
+	if err != nil {
+		return
+	}
+	defer netConn.Close()
+	log.Println("Connected!")
+	conn := bufio.NewReadWriter(bufio.NewReader(netConn), bufio.NewWriter(netConn))
+
+	// Send a 1.7 Server List Ping
+	// http://wiki.vg/Server_List_Ping (mostly)
+	data := make([]byte, 256)
+
+	err = binary.Write(conn, binary.BigEndian, uint8(0x0F))
+
+	n := binary.PutUvarint(data, 0)
+	err = binary.Write(conn, binary.BigEndian, data[:n])
+	if err != nil {
+		return
+	}
+
+	// Server List says to use 4 but 1.7.10 is actually 5.
+	n = binary.PutUvarint(data, 5)
+	err = binary.Write(conn, binary.BigEndian, data[:n])
+	if err != nil {
+		return
+	}
+
+	n = binary.PutUvarint(data, uint64(len(Config.MinecraftHost)))
+	err = binary.Write(conn, binary.BigEndian, data[:n])
+	if err != nil {
+		return
+	}
+	err = binary.Write(conn, binary.BigEndian, []byte(Config.MinecraftHost))
+	if err != nil {
+		return
+	}
+
+	err = binary.Write(conn, binary.BigEndian, uint16(Config.MinecraftPort))
+	if err != nil {
+		return
+	}
+
+	n = binary.PutUvarint(data, 1)
+	err = binary.Write(conn, binary.BigEndian, data[:n])
+	if err != nil {
+		return
+	}
+	// ??? but minecraft does it
+	err = binary.Write(conn, binary.BigEndian, data[:n])
+	if err != nil {
+		return
+	}
+
+	n = binary.PutUvarint(data, 0)
+	err = binary.Write(conn, binary.BigEndian, data[:n])
+	if err != nil {
+		return
+	}
+
+	conn.Flush()
+	log.Println("Wrote a bunch of junk, about to read...")
+
+	info := make(map[string]interface{})
+
+	// Just throw away five bytes.
+	for i := 0; i < 5; i++ {
+		_, err = conn.ReadByte()
+		if err != nil {
+			return
+		}
+	}
+
+	dec := json.NewDecoder(conn)
+	err = dec.Decode(&info)
+	if err != nil {
+		return
+	}
+
+	//err = fmt.Errorf("LOL TLDR")
+	version := info["version"].(map[string]interface{})
+	players := info["players"].(map[string]interface{})
+	stat = &MinecraftStatus{
+		ProtocolVersion: uint64(version["protocol"].(float64)),
+		ServerVersion:   version["name"].(string),
+		Motd:            info["description"].(string),
+		Players:         uint64(players["online"].(float64)),
+		MaxPlayers:      uint64(players["max"].(float64)),
+	}
+	return
+}
+
 func StatusReport(msg *SlackMessage) (text string, err error) {
+	stat, err := GetStatus()
+	if err != nil {
+		return
+	}
+
+	text = fmt.Sprintf("*%s* has *%d*/%d players on.", stat.Motd, stat.Players, stat.MaxPlayers)
+	return
 }
 
 func StatusRespond(msg *SlackMessage) (text string, err error) {
@@ -101,10 +213,21 @@ func main() {
 		w.Write([]byte(responseText))
 	})
 
-	MinecraftAddress, err = net.ResolveTCPAddr(Config.MinecraftAddress)
+	address := fmt.Sprintf("%s:%d", Config.MinecraftHost, Config.MinecraftPort)
+	MinecraftAddress, err = net.ResolveTCPAddr("tcp", address)
 	if err != nil {
-		log.Println("Error resolving Minecraft address", Config.MinecraftAddress, ":", err.Error())
+		log.Println("Error resolving Minecraft address", address, ":", err.Error())
 		return
+	}
+
+	// Try immediately if we're in debug mode.
+	if Config.Debug {
+		stat, err := GetStatus()
+		if err != nil {
+			log.Println(err.Error())
+			return
+		}
+		log.Println(stat.Motd)
 	}
 
 	http.ListenAndServe(Config.WebAddress, nil)

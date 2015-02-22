@@ -1,0 +1,8 @@
+{
+    "Debug": false,
+    "SlackTeam": "your-team-name",
+    "SlackToken": "outgoing-webhook-token",
+    "WebAddress": "localhost:8080",
+    "MinecraftHost": "your-minecraft-hostname.club",
+    "MinecraftPort": 25565
+}

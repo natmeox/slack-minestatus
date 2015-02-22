@@ -182,6 +182,16 @@ func main() {
 	}
 
 	http.HandleFunc("/jack/", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == "GET" {
+			text, err := StatusReport(nil)
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+			} else {
+				fmt.Fprintf(w, "%s", text)
+			}
+			return
+		}
+
 		trigger := req.PostFormValue("trigger_word")
 		fullText := req.PostFormValue("text")
 		text := strings.TrimSpace(strings.TrimPrefix(fullText, trigger))
